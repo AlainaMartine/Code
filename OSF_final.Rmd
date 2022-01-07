@@ -1,0 +1,827 @@
+---
+title: "OSF Process Analyses 02-03-20"
+output: 
+  html_document:
+    toc: true
+---
+
+# Description of Data
+318 college students completed the psychomotor vigiliance task (PVT) and the first-person shooter task (FPST). Sleep deprivation (rested, 24 hours without sleep) and caffeine consumption (placebo, caffeine) were manipulated between subjects.
+
+# Set-up environment
+
+## Load packages
+```{r installPackages, message = FALSE}
+#Call packages  
+library(lattice) #runjags dependency
+library(coda) #runjags dependency
+library(runjags) #for bayesian modeling
+library(MCMCpack) #for wishart distribution
+library(MCMCvis) #for summarizing MCMC output
+library(dplyr) #for manipulating data
+library(tidyr) #for tidying data
+library(ggplot2) #for plots
+library(tidyverse)
+
+#Source Kruschke's MCMC functions (must be in the same folder as this script)
+source("DBDA2E-utilities (1).R")
+```
+
+## Import, clean, and code data
+```{r loadData, results = "hide"}
+df <- read.csv("updatedFA17.csv", header = T, na.strings = "NA")
+pvt <- read.csv("FA17 PVT.csv", header = T, na.strings = "NA")
+id <- read.csv("Log Sheet.csv", header = T, na.strings = "NA")
+
+#Clean up data
+id <- id[, c("Participant..", "Condition", "Caf.Condition", "Date", "age", "sex", "race", "Notes", "fpstReason")]
+names(id) <- c("participant", "sleep", "pill", "date", "age", "sex", "race", "notes", "fpstReason")
+names(pvt)[1:6] <- c("participant", "time", "trial", "delay", "response", "rt")
+
+#See who has FPST and PVT data
+id$fpst <- id$participant %in% df$participant #lookup who was removed
+id$pvt <- id$participant %in% pvt$participant #lookup who was removed
+id$allData <- ifelse(id$fpst == T & id$pvt == T, T, F)
+
+#Look at people with missing data
+nrow(id[which(id$fpst == F | id$pvt == F), ]) #59 people with missing fpst or pvt
+id[which(id$fpst == F | id$pvt == F), c("participant", "fpst", "pvt")]
+
+#Reasons for dropping: 
+#27 (ran out of time), 23 (computer error), 5 (experimenter error) 
+#3 (withdrew), 1 = knew predictions (478), 1 = unravel error (351) 
+table(id[which(id$fpst == F | id$pvt == F), c("fpstReason")], useNA = "always")
+
+#Identify Ps without missing data
+include <- id[which(id$allData == T), "participant"] #Missing FPST or PVT data 
+include <- include[which(include != 478)] #Knew predictions
+include <- include[which(include != 351)] #No morning PVT data
+
+#Subset data
+id <- id[which(id$participant %in% include), ]
+df <- df[which(df$participant %in% include), ]
+pvt <- pvt[which(pvt$participant %in% include), ]
+
+#Convert sustained into caffeine
+id$caff <- dplyr::recode(id$pill, sustained = "caffeine")
+
+#Subset only relevant data
+df <- subset(df, select = -c(expName, raceDummy, objectDummy, shotDummy, correctDummy))
+
+#Add between subjects indices to the long-form data
+df$sleep <- df$caff <- df$pill <- NA
+for(i in 1:nrow(df)){
+  df[i, "sleep"] <- id[id$participant == df[i, "participant"], "sleep"]
+  df[i, "caff"] <- id[id$participant == df[i, "participant"], "caff"]
+  df[i, "pill"] <- id[id$participant == df[i, "participant"], "pill"]
+}
+
+
+#Create factors
+df$race <- factor(df$race, levels = c("white", "black"))
+df$object <- factor(df$object, levels = c("nogun", "gun"))
+df$caff <- factor(df$caff, labels = c("caffeine", "placebo"))
+df$shot <- factor(df$shot, levels = c("no", "yes"))
+df$sleep <- factor(df$sleep, labels = c("deprivation", "sleep"))
+df$caff <- relevel(df$caff, ref = "placebo")
+df$sleep <- relevel(df$sleep, ref = "sleep")
+#my code addition
+df$sex <- factor(df$sex, levels = c("Male", "female"))
+df$sex <- relevel(df$sex, ref = "Male")
+
+#storing a temp version of df in case we need the full df later
+df_temp <- df
+
+#subset df to only include placebo-subjects (our way of "controlling" for the effect of caffeing)
+dim(df)
+df <- subset(df, caff=="placebo")
+dim(df)
+
+
+```
+
+```{r Graphrace}
+df_summary <- df %>% filter(!is.na(sex))%>%
+  
+  mutate(correctDummy=ifelse(correct == "correct", 1, 0))%>%
+  group_by(participant, race)%>%
+  summarize(participant= participant[1], sex=sex[1], race=race[1], accuracy=sum(correctDummy)/n(), n=n())
+
+ ggplot(df_summary, aes(sex, accuracy, color=race))+
+  #geom_jitter()+
+   stat_summary(geom="point", fun.y="mean", size=3)+
+   stat_summary(geom="errorbar", fun.data=mean_se)
+ 
+  
+
+ 
+#df$correctDummy<-ifelse(df$correct=="correct", 1, 0)
+df %>% filter(!is.na(sex))%>%
+  
+  mutate(correctDummy=ifelse(correct == "correct", 1, 0))%>%
+  group_by(sex, race)%>%
+  summarize(sex=sex[1], race=race[1], accuracy=sum(correctDummy)/n())%>%
+  ggplot(aes(sex, accuracy, color=race))+
+  geom_point()
+
+
+
+#SEPARATE
+
+```{r Graphrace}
+df_summary <- df %>% filter(!is.na(sex))%>%
+  
+  mutate(shotDummy=ifelse(shot == "shot", 1, 0))%>%
+  group_by(participant, sex)%>%
+  summarize(participant= participant[1], sex=sex[1], shot=shot[1], shooting=sum(shotDummy)/n(), n=n())
+
+ ggplot(df_summary, aes(sex, object, color=race))+
+  #geom_jitter()+
+   stat_summary(geom="point", fun.y="mean", size=3)+
+   stat_summary(geom="errorbar", fun.data=mean_se)
+ 
+  
+
+#df$correctDummy<-ifelse(df$correct=="correct", 1, 0)
+df %>% filter(!is.na(sex))%>%
+  
+  mutate(shotDummy=ifelse(correct == "shot", 1, 0))%>%
+  group_by(sex, race, object)%>%
+  summarize(sex=sex[1], shooting=sum(shotDummy)/n())%>%
+  ggplot(aes(sex, shooting, color=race))+
+  geom_point()
+
+
+  
+  
+  
+
+```
+
+
+
+
+
+## Prepare data for JAGS
+```{r prepJAGS, results = "hide"}
+#Remove response times under 300ms (2.4%)
+df <- df[df$rt > 299 & df$rt < 3001, ]
+df <-df %>% filter(!is.na(sex))
+
+#Convert response times to ms for weiner package
+df$y <- ifelse(df$shot == "no", (df$rt * -1) / 1000, df$rt / 1000)
+nTrials <- nrow(df)
+
+#Relevel subjects for JAGS, which needs numbers from 1:N
+df$subject <- cumsum(c(1, diff(df$participant) !=0)) 
+nSubject <- max(df$subject)
+
+#Contrast code variables
+race <- dplyr::recode(df$race, white = -.5, black = .5)
+object <- dplyr::recode(df$object, nogun = -.5, gun = .5)
+neg <- dplyr::recode(df$object, nogun = -1, gun = 1)
+caff <- dplyr::recode(df$caff, placebo = -.5, caffeine = .5)
+sleep <- dplyr::recode(df$sleep, sleep = -.5, deprivation = .5)
+#my code
+sex <- dplyr::recode(df$sex, Male = -.5, female = .5)
+
+#Calculate the minimum RT for each subject
+minRT <- df %>% 
+  group_by(subject) %>% 
+  summarize(rt = min(rt, na.rm = T)) 
+minRT <- minRT$rt
+minRT <- minRT/1000
+
+#Identity matrix for the Wishart prior for the inverse coviariance matrix
+nParams <- 4 #four DDM parameters
+I <- diag(nParams)
+
+#save minimum response time by condition for plotting
+minMean <- df %>% 
+  group_by(subject, race, object) %>%
+  summarize(rt = min(rt, na.rm = T)) %>% 
+  group_by(race, object) %>%
+  summarize(rt = round(mean(rt, na.rm = T)))
+write.csv(minMean, "condMin.csv", row.names = F)
+
+#Create list of data to send to JAGS
+datalist <- list(
+  y = df$y, nTrials = nTrials, 
+  subject = df$subject, nSub = nSubject,
+  ID1 = race, ID2 = sleep, ID3 = sex, ID4 = object,
+  I = I, nParams = nParams,
+  neg = neg, minRT = minRT)
+
+#Create function of initial values
+#Create function of initial values
+initfunction <- function(chain){
+  return(list(
+    xiAhat = runif(1, 0, 1),
+    xiBhat = runif(1, 0, 1),
+    xiThat = runif(1, 0, 1),
+    xiDhat = runif(1, 0, 1),
+    muAhat = rnorm(1, -1, .1),
+    muBhat = rnorm(1, 0, .1),
+    muThat = rnorm(1, 0, .1),
+    muDhat = rnorm(1, 0, .1),
+    bA1 = runif(1, -.1, .1),
+    bA2 = runif(1, -.1, .1),
+    bA3 = runif(1, -.1, .1),
+    bA4 = runif(1, -.1, .1),
+    bA5 = runif(1, -.1, .1),
+    bA6 = runif(1, -.1, .1),
+    bA7 = runif(1, -.1, .1),
+    bB1 = runif(1, -.1, .1),
+    bB2 = runif(1, -.1, .1),
+    bB3 = runif(1, -.1, .1),
+    bB4 = runif(1, -.1, .1),
+    bB5 = runif(1, -.1, .1),
+    bB6 = runif(1, -.1, .1),
+    bB7 = runif(1, -.1, .1),
+    bT1 = runif(1, -.1, .1),
+    bT2 = runif(1, -.1, .1),
+    bT3 = runif(1, -.1, .1),
+    bT4 = runif(1, -.1, .1),
+    bT5 = runif(1, -.1, .1),
+    bT6 = runif(1, -.1, .1),
+    bT7 = runif(1, -.1, .1),
+    bD1 = runif(1, -.1, .1),
+    bD2 = runif(1, -.1, .1),
+    bD3 = runif(1, -.1, .1),
+    bD4 = runif(1, -.1, .1),
+    bD5 = runif(1, -.1, .1),
+    bD6 = runif(1, -.1, .1),
+    bD7 = runif(1, -.1, .1),
+    bD8 = runif(1, -.1, .1),
+    bD9 = runif(1, -.1, .1),
+    bD10 = runif(1, -.1, .1),
+    bD11 = runif(1, -.1, .1),
+    bD12 = runif(1, -.1, .1),
+    bD13 = runif(1, -.1, .1),
+    bD14 = runif(1, -.1, .1),
+    bD15 = runif(1, -.1, .1),
+    SigmaInv = rwish(nParams + 1, diag(nParams)),
+    .RNG.name = "lecuyer::RngStream",
+    .RNG.seed = sample.int(1e10, 1, replace = F)
+  ))
+}
+
+#Create list of parameters to be monitored
+parameters <- c(c(
+  "muAhat", "muBhat", "muThat", "muDhat",
+  "xiAhat", "xiBhat", "xiThat", "xiDhat",
+  #"deltaAhat", "deltaBhat", "deltaThat", "deltaDhat", #Omit to save space
+  "muA", "muB", "muT", "muD", "deviance",
+  "sigmaA", "sigmaB", "sigmaT", "sigmaD", "rho"),
+  paste0("bA", 1:7), paste0("bB", 1:7), 
+  paste0("bT", 1:7), paste0("bD", 1:15))  
+
+nUseSteps = 24 * 8000 #Specify number of steps to run
+nChains = 24 #Specify number of chains to r
+```
+
+# Process Analyses of FPST Data
+
+## Run the model in JAGS and save results
+```{r runJAGS, eval = FALSE}
+startTime = proc.time()
+jagsModel <- run.jags(method = "parallel",
+  model = "C:/Users/alain/Desktop/JAGS Model Real.txt",
+  monitor = parameters,
+  data = datalist,
+  inits = initfunction,
+  n.chains = nChains,
+  adapt = 2000, #how long the samplers "tune"
+  burnin = 000, #how long of a burn in
+  sample = ceiling(nUseSteps/nChains),
+  thin = 5, #thin by 10
+  modules = c("wiener", "lecuyer"),
+  summarise = F,
+  plots = F)
+stopTime = proc.time()
+elapsedTime = stopTime - startTime
+show(elapsedTime/60/60) #Takes 64h for 480k samples (96k with thinning) 
+
+#Save the samples as an R data file
+save(jagsModel, file = "finalsamples.RData")
+```
+
+```{r loadSamples, include = FALSE}
+load("finalsamples.RData")
+```
+
+## Restucture samples for diagnostics and analyses
+```{r restructureSamples, include = FALSE}
+#Convert the runjags object to a coda format
+codaSamples <- as.mcmc.list(jagsModel)
+
+#Turn MCMC samples into a single matrix with all data
+mcmcMat <- as.matrix(codaSamples, chains = F)
+
+#DIC is the sum of the posterior mean deviance (Dbar; the -2*log-likelihood) 
+#and the effective # of parameters (pD; Spiegelhalter et. al; 2002,  p. 587)
+#pD is estimated as half the variance of Dbar
+round(mean(mcmcMat[,"deviance"]))
+round(.5 * var(mcmcMat[,"deviance"])) 
+round(mean(mcmcMat[,"deviance"])  + .5 * var(mcmcMat[,"deviance"]))
+```
+
+## Diagnostics plots on condition-level parameters
+These produce trace and density plots but are not run due to space reasons. Summaries of diagnostics can be found in the tables below.
+```{r mcmcDiagnostics, eval = FALSE}
+names <- grep("mu.", colnames(mcmcMat), value = T)[5:8]
+  for(i in names){diagMCMC(codaObject = codaSamples, parName = i)}
+names <- grep("sigma", colnames(mcmcMat), value = T)
+  for(i in names){diagMCMC(codaObject = codaSamples, parName = i)}
+names <- grep("rho", colnames(mcmcMat), value = T)[c(2:4, 7:8, 12)]
+  for(i in names){diagMCMC(codaObject = codaSamples, parName = i)}
+names <- grep("bA", colnames(mcmcMat), value = T)
+  for(i in names){diagMCMC(codaObject = codaSamples, parName = i)}
+names <- grep("bB", colnames(mcmcMat), value = T)
+  for(i in names){diagMCMC(codaObject = codaSamples, parName = i)}
+names <- grep("bT", colnames(mcmcMat), value = T)
+  for(i in names){diagMCMC(codaObject = codaSamples, parName = i)}
+names <- grep("bD", colnames(mcmcMat), value = T)
+  for(i in names){diagMCMC(codaObject = codaSamples, parName = i)}
+```
+
+## Diagnostic summaries of condition-level parameters
+```{r mcmcSummary, message=FALSE}
+#Function to extract the mode
+fnmode = function(sample){density(sample)$x[which.max(density(sample)$y)]}
+
+#Calculates summaries (mode, 95% HDI) and diagnostics(ESS, and R-hat)
+postDist <- MCMCsummary(object = codaSamples, probs = c(.025, .975), HPD = T, 
+  params = "all", func = fnmode, func_name = c("mode"))
+postDist <- postDist[grep(
+  "hat|deviance|\\[1,1|\\[2,2|\\[3,3|\\[4,4|\\[1,2|\\[1,3|\\[2,3|\\[1,4|\\[2,4 |\\[3,4", 
+  row.names(postDist), value = T, invert = T), ]
+postDist <- postDist[, c("mode", "95%_HPDL", "95%_HPDU", "Rhat", "n.eff")]
+postDist <- cbind(parameter = row.names(postDist), postDist)
+
+#Calculates autocorrelation
+postAuto <- autocorr.diag(codaSamples)
+postAuto <- postAuto[, grep(
+  "hat|deviance|\\[1,1|\\[2,2|\\[3,3|\\[4,4|\\[1,2|\\[1,3|\\[2,3|\\[1,4|\\[2,4|\\[3,4", 
+  colnames(postAuto), value = T, invert = T)]
+postAuto <- t(postAuto)
+postAuto <- postAuto[, c("Lag 5")]
+
+#Combine information
+postSumm <- cbind(postDist, postAuto) 
+row.names(postSumm) <- NULL
+postSumm[, c(2:4)] <- apply(postSumm[, c(2:4)], 2, round, 3)
+postSumm[, "postAuto"] <- round(postSumm[, "postAuto"], 2)
+
+#Tidy data frame
+names(postSumm) <- c("effect", "mean", "low", "high", "Rhat", "ESS", "auto")
+
+#Function to transform betas from probit scale to parameter scale and Cohen's d
+tranSumm <- function(matrix, beta, param, sig = 3) {
+  mean <- fnmode(matrix[, beta]) 
+  hdi <- HDIofMCMC(matrix[, beta])
+  meanD <- fnmode(matrix[, beta] /
+    matrix[, grep(paste0("sigma", param), colnames(matrix), value = T)])
+  hdiD <- HDIofMCMC(matrix[, beta]  /
+    matrix[, grep(paste0("sigma", param), colnames(matrix), value = T)])
+  if (param == "A") {
+  	meanP <- fnmode(5 * pnorm(matrix[, beta]) - 2.5) 
+    hdiP <- HDIofMCMC(5 * pnorm(matrix[, beta]) - 2.5)
+  } else if (param == "B") {
+  	meanP <- fnmode(1 * pnorm(matrix[, beta]) - .50) 
+    hdiP <- HDIofMCMC(1 * pnorm(matrix[, beta]) - .50)
+  } else if (param == "T") {
+  	meanP <- fnmode(1 * pnorm(matrix[, beta]) - .50) 
+    hdiP <- HDIofMCMC(1 * pnorm(matrix[, beta]) - .50)
+  } else if (param == "D") {
+  	meanP <- fnmode(10 * pnorm(matrix[, beta]) - 5.0) 
+    hdiP <- HDIofMCMC(10 * pnorm(matrix[, beta]) - 5.0)
+  }
+  sum <- data.frame(mean = mean, low = hdi[1], high = hdi[2], meanP = meanP, 
+    lowP = hdiP[1], highP = hdiP[2], meanD = meanD, lowD = hdiD[1], highD = hdiD[2])
+  sum[, c("meanD", "lowD", "highD")] <- round(sum[, c("meanD", "lowD", "highD")], 2)
+  sum <- round(sum, sig)
+  return(cbind(effect = beta, sum))
+}
+
+
+
+
+
+#Apply function to samples
+betaSumm <- rbind(
+tranSumm(mcmcMat, "bA1", "A", sig = 3),
+tranSumm(mcmcMat, "bA2", "A", sig = 3),
+tranSumm(mcmcMat, "bA3", "A", sig = 3),
+tranSumm(mcmcMat, "bA4", "A", sig = 3),
+tranSumm(mcmcMat, "bA5", "A", sig = 3),
+tranSumm(mcmcMat, "bA6", "A", sig = 3),
+tranSumm(mcmcMat, "bA7", "A", sig = 3),
+tranSumm(mcmcMat, "bB1", "B", sig = 3),
+tranSumm(mcmcMat, "bB2", "B", sig = 3),
+tranSumm(mcmcMat, "bB3", "B", sig = 3),
+tranSumm(mcmcMat, "bB4", "B", sig = 3),
+tranSumm(mcmcMat, "bB5", "B", sig = 3),
+tranSumm(mcmcMat, "bB6", "B", sig = 3),
+tranSumm(mcmcMat, "bB7", "B", sig = 3),
+tranSumm(mcmcMat, "bT1", "T", sig = 3),
+tranSumm(mcmcMat, "bT2", "T", sig = 3),
+tranSumm(mcmcMat, "bT3", "T", sig = 3),
+tranSumm(mcmcMat, "bT4", "T", sig = 3),
+tranSumm(mcmcMat, "bT5", "T", sig = 3),
+tranSumm(mcmcMat, "bT6", "T", sig = 3),
+tranSumm(mcmcMat, "bT7", "T", sig = 3),
+tranSumm(mcmcMat, "bD1", "D", sig = 3),
+tranSumm(mcmcMat, "bD2", "D", sig = 3),
+tranSumm(mcmcMat, "bD3", "D", sig = 3),
+tranSumm(mcmcMat, "bD4", "D", sig = 3),
+tranSumm(mcmcMat, "bD5", "D", sig = 3),
+tranSumm(mcmcMat, "bD6", "D", sig = 3),
+tranSumm(mcmcMat, "bD7", "D", sig = 3),
+tranSumm(mcmcMat, "bD8", "D", sig = 3),
+tranSumm(mcmcMat, "bD9", "D", sig = 3),
+tranSumm(mcmcMat, "bD10", "D", sig = 3),
+tranSumm(mcmcMat, "bD11", "D", sig = 3),
+tranSumm(mcmcMat, "bD12", "D", sig = 3),
+tranSumm(mcmcMat, "bD13", "D", sig = 3),
+tranSumm(mcmcMat, "bD14", "D", sig = 3),
+tranSumm(mcmcMat, "bD15", "D", sig = 3)
+)
+
+#Tidy data
+betaSumm <- cbind(effect = betaSumm$effect, 
+  param = c(rep("alpha", 7), rep("beta", 7), rep("tau", 7), rep("delta", 15)),
+  betaSumm[, 2:ncol(betaSumm)], 
+  postSumm[grep("b.*", postSumm$effect), c("Rhat", "ESS", "auto")]  
+)
+```
+
+## Get paramter estimates
+"Param, low, and high" give the estimates in the probit space. The same-named columns that end in P give the estimates converted back the original paramter space. The same-named columns that end in D give the estimates standardized using the condition-level standard deviation. Rhat is the Gelman-Rubin statistic, ESS is the effective sample size, and auto is the autocorrelation calcuated at five steps.
+```{r paramEstimates, message = FALSE}
+#Condition estimates and diagnostics
+postSumm[1:14,]
+
+#Effect estimates and diagnostics
+betaSumm
+```
+
+## Create functions for hypothesis testing
+```{r functions, message = FALSE}
+#Formula to get means and Cohen's d
+#effect is a vector of MCMC samples for effect
+#pMean is the parameter mean
+#pScale is the paramter scale (B/T = 1, A = 5, D = 10)
+#pSd is a vector of MCMC samples of the sd
+#sig is a vector of number of decimals to round to (for paramter and Cohen's d)
+sumBayes <- function(effect, pMean, pSd = 1, pScale = 1,  sig = c(3,2)) { 
+  mean <- round(fnmode(pMean + pScale * pnorm(effect)) - pScale / 2, sig[1])
+  hdi <- round(HDIofMCMC(pMean + pScale * pnorm(effect)) - pScale / 2, sig[1])
+  meanD <- round(fnmode(effect / pSd), sig[2])
+  hdiD <- round(HDIofMCMC(effect / pSd), sig[2])
+  sum <- data.frame(mean = mean, low = hdi[1], high = hdi[2], 
+    meanD = meanD, lowD = hdiD[1], highD = hdiD[2])
+  return(sum)
+}  
+
+#Convert matrix of samples to data frame for analysis
+samp <- as.data.frame(mcmcMat)
+```
+
+## Description of the data
+Parameter notation:
+
+B = Race (-.5 = White, .5 = Black)
+D = Deprivation (-.5 = Rested, .5 = Deprived)
+C = Sex (-.5 = Male, .5 = female)
+G = Object (-.5 = Nongun, .5 = Gun)
+
+
+Beta values are consistent across all paramters
+Note that only delta (drift rate) varies by object (b8-b17)
+
+1. B
+2. D
+3. C
+4. BD
+5. BC
+6. DC
+7. BDC
+8. G
+9. BG
+10. DG
+11. CG
+12. BDG
+13. BCG
+14. DCG
+15. BDCG
+
+# Hypothesis Testing
+
+## Threshold Separation
+Main effect of deprivation, RC interaction
+```{r alpha, message = FALSE}
+betaSumm[which(grepl("bA", betaSumm$effect)), c(1, 6:11)]
+
+#Placebo, White
+with(data = samp, sumBayes(-.5*bA1 + -.5*bA3 + -.5*-.5*bA5, muA, sigmaA, 5, c(3,2)))
+#Placebo, Black
+with(data = samp, sumBayes( .5*bA1 + -.5*bA3 +  .5*-.5*bA5, muA, sigmaA, 5, c(3,2)))
+#W-B Placebo
+with(data = samp, sumBayes(-1*bA1 + .5*bA5, 0, sigmaA, 5, c(3,2)))
+
+#Caffeine, White 
+with(data = samp, sumBayes(-.5*bA1 +  .5*bA3 + -.5* .5*bA5, muA, sigmaA, 5, c(3,2)))
+#Caffeine, Black
+with(data = samp, sumBayes( .5*bA1 +  .5*bA3 +  .5* .5*bA5, muA, sigmaA, 5, c(3,2)))
+#W-B Caffeine
+with(data = samp, sumBayes(-1*bA1 - .5*bA5, 0, sigmaA, 5, c(3,2)))
+
+#Female, white
+#white or black, placebo or caffine, 
+with(data = samp, sumBayes(-.5*bA1 + -.5*bA3 + -.5*-.5*bA5, muA, sigmaA, 5, c(3,2)))
+
+
+
+```
+
+## Relative Start Point
+Main effects of deprivation, moderated by RD interaction
+```{r beta, message = FALSE}
+betaSumm[which(grepl("bB", betaSumm$effect)), c(1, 6:11)]
+
+#Placebo, White
+with(data = samp, sumBayes(-.5*bB1 + -.5*bB3 + -.5*-.5*bB5, muB, sigmaB, 1, c(3,2)))
+#Placebo, Black
+with(data = samp, sumBayes( .5*bB1 + -.5*bB3 +  .5*-.5*bB5, muB, sigmaB, 1, c(3,2)))
+#W-B Placebo
+with(data = samp, sumBayes(-1*bB1 + .5*bB5, 0, sigmaB, 1, c(3,2)))
+
+#Caffeine, White
+with(data = samp, sumBayes(-.5*bB1 +  .5*bB3 + -.5* .5*bB5, muB, sigmaB, 1, c(3,2)))
+#Caffeine, Black
+with(data = samp, sumBayes( .5*bB1 +  .5*bB3 +  .5* .5*bB5, muB, sigmaB, 1, c(3,2)))
+#W-B Caffeine
+with(data = samp, sumBayes(-1*bB1 - .5*bB5, 0, sigmaB, 1, c(3,2)))
+```
+
+## Drift Rate
+Main effects of race, deprivation, and object, moderated by RO and RD interaction
+```{r delta, message = FALSE}
+betaSumm[which(grepl("bD", betaSumm$effect)), c(1, 6:11)]
+
+#White, unarmed
+with(data = samp, sumBayes(-.5*bD1 + -.5*bD8 + -.5*-.5*bD9, muD, sigmaD, 10, c(2,2)))
+#Black, unarmed
+with(data = samp, sumBayes( .5*bD1 + -.5*bD8 +  .5*-.5*bD9, muD, sigmaD, 10, c(2,2)))
+#W-B Unarmed
+with(data = samp, sumBayes(-1*bD1 + .5*bD9, 0, sigmaD, 10, c(2,2)))
+
+#White, armed
+with(data = samp, sumBayes(-.5*bD1 +  .5*bD8 + -.5* .5*bD9, muD, sigmaD, 10, c(2,2)))
+#Black, armed
+with(data = samp, sumBayes( .5*bD1 +  .5*bD8 +  .5* .5*bD9, muD, sigmaD, 10, c(2,2)))
+#W-B Armed
+with(data = samp, sumBayes(-1*bD1 - .5*bD9, 0, sigmaD, 10, c(2,2)))
+
+#Sleep, unarmed
+with(data = samp, sumBayes(-.5*bD2 + -.5*bD8 + -.5*-.5*bD9, muD, sigmaD, 10, c(2,2)))
+#Deprived, unarmed
+with(data = samp, sumBayes( .5*bD2 + -.5*bD8 +  .5*-.5*bD9, muD, sigmaD, 10, c(2,2)))
+#S-D Unarmed
+with(data = samp, sumBayes(-1*bD2 + .5*bD9, 0, sigmaD, 10, c(2,2)))
+
+#Sleep, armed
+with(data = samp, sumBayes(-.5*bD2 +  .5*bD8 + -.5* .5*bD9, muD, sigmaD, 10, c(2,2)))
+#Deprived, armed
+with(data = samp, sumBayes( .5*bD2 +  .5*bD8 +  .5* .5*bD9, muD, sigmaD, 10, c(2,2)))
+#S-D Unarmed
+with(data = samp, sumBayes(-1*bD2 - .5*bD9, 0, sigmaD, 10, c(2,2)))
+```
+
+## Non-decision Time
+RC interaction, moderated by RDC interaction
+```{r tau, message = FALSE}
+betaSumm[which(grepl("bT", betaSumm$effect)), c(1, 6:11)]
+
+#W-B, sleep, placebo
+with(data = samp, sumBayes(-1*bT1 +  .5*bT4 +  .5*bT5 + -.25*bT7, 0, sigmaT, 1, c(3,2)))
+#W-B, sleep, caffeine
+with(data = samp, sumBayes(-1*bT1 +  .5*bT4 + -.5*bT5 +  .25*bT7, 0, sigmaT, 1, c(3,2)))
+#W-B, P-C, sleep (two-way interaction)
+with(data = samp, sumBayes(1*bT5 - .5*bT7, 0, sigmaT, 1, c(3,2)))
+
+#W-B, deprivation, placebo
+with(data = samp, sumBayes(-1*bT1 + -.5*bT4 +  .5*bT5 +  .25*bT7, 0, sigmaT, 1, c(3,2)))
+#W-B, deprivation, caffeine
+with(data = samp, sumBayes(-1*bT1 + -.5*bT4 + -.5*bT5 + -.25*bT7, 0, sigmaT, 1, c(3,2)))
+#W-B, P-C, deprivation (two-way interaction)
+with(data = samp, sumBayes(1*bT5 + .5*bT7, 0, sigmaT, 1, c(3,2)))
+```
+
+# Plotting Data
+
+# Summarize Data
+```{r summarizeData, message = FALSE}
+#Create matrixes indicating condtions
+
+#Create matrixes indicating condtions
+cABT <- expand.grid(race = c(-.5, .5), sleep = c(-.5, .5),
+  caff = c(-.5, .5))
+cD <- expand.grid(race = c(-.5, .5), sleep = c(-.5, .5), 
+  caff = c(-.5, .5), object = c(-.5, .5))
+
+#DO I REPLACE SEX HERE
+
+#Create function to generate condition means (alpha, beta, tau)
+conABT <- function(mat, con, param, sig) {
+  cM <- vector("numeric", length = nrow(con))
+  hdiM <- data.frame(rep(NA, nrow(con)), rep(NA, nrow(con)))
+  for (i in 1:nrow(con)) {
+    cM[i] <- fnmode(mat[, paste0("mu", param)] + 
+      ifelse(param == "A", 5, 1) * pnorm(
+      mat[, paste0("b", param, "1")] * cABT[i ,1] + #black
+      mat[, paste0("b", param, "2")] * cABT[i ,2] + #deprivation
+      mat[, paste0("b", param, "3")] * cABT[i ,3] + #caffeine
+      mat[, paste0("b", param, "4")] * cABT[i ,1] * cABT[i ,2] + #BD
+      mat[, paste0("b", param, "5")] * cABT[i ,1] * cABT[i ,3] + #BC
+      mat[, paste0("b", param, "6")] * cABT[i ,2] * cABT[i ,3] + #DC
+      mat[, paste0("b", param, "7")] * cABT[i ,1] * cABT[i ,2] * con[i ,3]) #BDC
+      - ifelse(param == "A", 2.5, .5))
+    hdiM[i, ] <- HDIofMCMC(mat[, paste0("mu", param)] + 
+      ifelse(param == "A", 5, 1) * pnorm(
+      mat[, paste0("b", param, "1")] * cABT[i ,1] + #black
+      mat[, paste0("b", param, "2")] * cABT[i ,2] + #deprivation
+      mat[, paste0("b", param, "3")] * cABT[i ,3] + #caffeine
+      mat[, paste0("b", param, "4")] * cABT[i ,1] * cABT[i ,2] + #BD
+      mat[, paste0("b", param, "5")] * cABT[i ,1] * cABT[i ,3] + #BC
+      mat[, paste0("b", param, "6")] * cABT[i ,2] * cABT[i ,3] + #DC
+      mat[, paste0("b", param, "7")] * cABT[i ,1] * cABT[i ,2] * con[i ,3]) #BDC
+      - ifelse(param == "A", 2.5, .5))
+  }
+  cM <- data.frame(mean = cM, low = hdiM[, 1], high = hdiM[, 2])
+  cM <- round(cM, sig)
+  return(cM)
+}
+
+#Create function to generate condition means (delta)
+conD <- function(mat, con, param, sig) {
+  cM <- vector("numeric", length = nrow(con))
+  hdiM <- data.frame(rep(NA, nrow(con)), rep(NA, nrow(con)))
+  for (i in 1:nrow(con)) {
+    cM[i] <- fnmode(mat[, paste0("mu", param)] + 10 * pnorm(
+      mat[, paste0("b", param, "1")] * cD[i ,1] + #black
+      mat[, paste0("b", param, "2")] * cD[i ,2] + #deprivation
+      mat[, paste0("b", param, "3")] * cD[i ,3] + #caffeine
+      mat[, paste0("b", param, "4")] * cD[i ,1] * cD[i ,2] + #BD
+      mat[, paste0("b", param, "5")] * cD[i ,1] * cD[i ,3] + #BC
+      mat[, paste0("b", param, "6")] * cD[i ,2] * cD[i ,3] + #DC
+      mat[, paste0("b", param, "7")] * cD[i ,1] * cD[i ,2] * cD[i ,3] + #BDC
+      mat[, paste0("b", param, "8")] * cD[i ,4] + #gun
+      mat[, paste0("b", param, "9")] * cD[i ,1] * cD[i, 4] + #BG
+      mat[, paste0("b", param, "10")] * cD[i ,2] * cD[i, 4]  + #DG
+      mat[, paste0("b", param, "11")] * cD[i ,3] * cD[i ,4] + #CG
+      mat[, paste0("b", param, "12")] * cD[i ,1] * cD[i ,2] * cD[i, 4]  + #BDG
+      mat[, paste0("b", param, "13")] * cD[i ,1] * cD[i ,3] * cD[i, 4]  + #BCG
+      mat[, paste0("b", param, "14")] * cD[i ,2] * cD[i ,3] * cD[i ,4] + #DCG
+      mat[, paste0("b", param, "15")] * cD[i ,1] * cD[i, 2]  * cD[i, 3]  * cD[i, 4])
+      - 5) #BDCG
+    hdiM[i, ] <- HDIofMCMC(mat[, paste0("mu", param)] + 10 * pnorm(
+      mat[, paste0("b", param, "1")] * cD[i ,1] + #black
+      mat[, paste0("b", param, "2")] * cD[i ,2] + #deprivation
+      mat[, paste0("b", param, "3")] * cD[i ,3] + #caffeine
+      mat[, paste0("b", param, "4")] * cD[i ,1] * cD[i ,2] + #BD
+      mat[, paste0("b", param, "5")] * cD[i ,1] * cD[i ,3] + #BC
+      mat[, paste0("b", param, "6")] * cD[i ,2] * cD[i ,3] + #DC
+      mat[, paste0("b", param, "7")] * cD[i ,1] * cD[i ,2] * cD[i ,3] + #BDC
+      mat[, paste0("b", param, "8")] * cD[i ,4] + #gun
+      mat[, paste0("b", param, "9")] * cD[i ,1] * cD[i, 4] + #BG
+      mat[, paste0("b", param, "10")] * cD[i ,2] * cD[i, 4]  + #DG
+      mat[, paste0("b", param, "11")] * cD[i ,3] * cD[i ,4] + #CG
+      mat[, paste0("b", param, "12")] * cD[i ,1] * cD[i ,2] * cD[i, 4]  + #BDG
+      mat[, paste0("b", param, "13")] * cD[i ,1] * cD[i ,3] * cD[i, 4]  + #BCG
+      mat[, paste0("b", param, "14")] * cD[i ,2] * cD[i ,3] * cD[i ,4] + #DCG
+      mat[, paste0("b", param, "15")] * cD[i ,1] * cD[i, 2]  * cD[i, 3]  * cD[i, 4])
+      - 5) #BDCG
+  }
+  cM <- data.frame(mean = cM, low = hdiM[, 1], high = hdiM[, 2])
+  cM <- round(cM, sig)
+  return(cM)
+}
+
+#Generate condition names
+namesABT <- expand.grid(race = c("White", "Black"), sleep = c("Rested", "Deprivation"), 
+  caff = c("Placebo", "Caffeine"))
+namesD <- expand.grid(race = c("White", "Black"), sleep = c("Rested", "Deprivation"), 
+  caff = c("Placebo", "Caffeine"), object = c("Unarmed", "Armed"))
+namesABT$condition <- paste(namesABT$sleep, namesABT$caff, sep = "\n")
+namesABT$condition <- factor(namesABT$condition, levels = unique(namesABT$condition))
+#namesABT$condition <- paste(namesABT$sleep, namesABT$caff, sep = "\n")
+namesD$condition <- paste(namesD$sleep, namesD$caff, sep = "\n")
+namesD$condition <- factor(namesD$condition, levels = unique(namesD$condition))
+
+#Generate condition means
+aPlot <- cbind(namesABT, conABT(mcmcMat, cABT, "A", 3))
+bPlot <- cbind(namesABT, conABT(mcmcMat, cABT, "B", 3))
+tPlot <- cbind(namesABT, conABT(mcmcMat, cABT, "T", 3))
+dPlot <- cbind(namesD, conD(mcmcMat, cD, "D", 2))
+```
+
+## Plot Diffusion Model Results
+```{r plotDDM, message = FALSE}
+al <- ggplot(aes(x = condition, y = mean, shape = race, fill = race)) + 
+  geom_errorbar(ymin = low, ymax = high), 
+    position = position_dodge(.9), width = 0, size = .25) +
+  geom_point(aes(fill = race, shape = race), 
+    position = position_dodge(.9), size = 2) +
+  scale_fill_manual(values = c("white", "gray")) + #different fill types
+  scale_shape_manual(values = c(21, 23)) + #different shape types
+  coord_cartesian(ylim = c(0.94, 1.12)) + #adjust y-axis
+  scale_y_continuous(breaks = (seq(0, 5, .04))) + 
+  ylab(expression(paste("Threshold (", alpha, ")"))) +
+  theme_bw() +
+  theme(
+    legend.position = c(.70, .85),
+    legend.title = element_blank(),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.direction = "horizontal",
+    axis.title.y = element_text(angle = 90, vjust = .5),  
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = .5, vjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = .5))
+print(al)
+
+be <- ggplot(bPlot, aes(x = condition, y = mean, shape = race, fill = race)) + 
+  geom_errorbar(aes(ymin = low, ymax = high), 
+    position = position_dodge(.9), width = 0, size = .25) +
+  geom_point(aes(fill = race, shape = race), 
+    position = position_dodge(.9), size = 2) +
+  scale_fill_manual(values = c("white", "gray")) + #different fill types
+  scale_shape_manual(values = c(21, 23)) + #different shape types
+  coord_cartesian(ylim = c(.48, .56)) + #adjust y-axis
+  scale_y_continuous(breaks = (seq(0, 1, .02))) + 
+  ylab(expression(paste("Start Point (", beta, ")"))) +
+  #geom_hline(yintercept = .5, linetype = "dashed") +
+  theme_bw() +
+  theme(
+    legend.position = "none", 
+    axis.title.y = element_text(angle = 90, vjust = .5),  
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = .5, vjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = .5))
+print(be)
+
+ta <- ggplot(tPlot, aes(x = condition, y = mean, shape = race, fill = race)) + 
+  geom_errorbar(aes(ymin = low, ymax = high), 
+    position = position_dodge(.9), width = 0, size = .25) +
+  geom_point(aes(fill = race, shape = race), 
+    position = position_dodge(.9), size = 2) +
+  scale_fill_manual(values = c("white", "gray")) + #different fill types
+  scale_shape_manual(values = c(21, 23)) + #different shape types
+  coord_cartesian(ylim = c(0.9, 1.0)) + #adjust y-axis
+  scale_y_continuous(breaks = (seq(0, 1, .02))) + 
+  ylab(expression(paste("Non-decision Time (", tau, "')"))) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.title.y = element_text(angle = 90, vjust = .5),  
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = .5, vjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = .5))
+ta
+
+de <- ggplot(dPlot, aes(x = condition, y = sex, shape = race, fill = race)) + 
+  geom_errorbar(aes(ymin = low, ymax = high), 
+    position = position_dodge(.9), width = 0, size = .25) +
+  geom_point(aes(fill = race, shape = race), 
+    position = position_dodge(.9), size = 2) +
+  scale_fill_manual(values = c("white", "gray")) + #different fill types
+  scale_shape_manual(values = c(21, 23)) + #different shape types
+  coord_cartesian(ylim = c(-1.5, 2.0)) + #adjust y-axis
+  scale_y_continuous(breaks = (seq(-10, 10, .5))) + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ylab(expression(paste("Drift Rate (", delta, ")"))) +
+  theme_bw() +
+  theme(
+    legend.position = "none", 
+    axis.title.y = element_text(angle = 90, vjust = .5),  
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = .5, vjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = .5))
+de
+print(de)
+```
+
+
+
+
+
