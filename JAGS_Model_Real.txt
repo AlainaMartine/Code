@@ -1,0 +1,100 @@
+model{
+#likelihood function
+for (i in 1:nTrials) {
+y[i] ~ dwiener(alpha[i], tau[i], beta[i], delta[i])
+alpha[i] <- .1 + 4.9 * phi(muAhat + xiAhat * deltaAhat[subject[i]] + 
+bA1 * ID1[i] + bA2 * ID2[i] + bA3 * ID3[i] + bA4 * ID1[i] * ID2[i] +
+bA5 * ID1[i] * ID3[i] + bA6 * ID2[i] * ID3[i] + bA7 * ID1[i] * ID2[i] * ID3[i])
+beta[i] <- .05 + .90 * phi(muBhat + xiBhat * deltaBhat[subject[i]] + 
+bB1 * ID1[i] + bB2 * ID2[i] + bB3 * ID3[i] + bB4 * ID1[i] * ID2[i] +
+bB5 * ID1[i] * ID3[i] + bB6 * ID2[i] * ID3[i] + bB7 * ID1[i] * ID2[i] * ID3[i])
+tau[i] <- minRT[subject[i]] * phi(muThat + xiThat * deltaThat[subject[i]] +
+bT1 * ID1[i] + bT2 * ID2[i] + bT3 * ID3[i] + bT4 * ID1[i] * ID2[i] +
+bT5 * ID1[i] * ID3[i] + bT6 * ID2[i] * ID3[i] + bT7 * ID1[i] * ID2[i] * ID3[i])
+delta[i] <- -5 + 10 * phi(muDhat + neg[i] * xiDhat * deltaDhat[subject[i]] + 
+bD1 * ID1[i] + bD2 * ID2[i] + bD3 * ID3[i] + bD4 * ID1[i] * ID2[i] +
+bD5 * ID1[i] * ID3[i] + bD6 * ID2[i] * ID3[i] + bD7 * ID1[i] * ID2[i] * ID3[i] + 
+bD8 * ID4[i] + bD9 * ID1[i] * ID4[i] + bD10 * ID2[i] * ID4[i] + 
+bD11 * ID3[i] * ID4[i] + bD12 * ID1[i] * ID2[i] * ID4[i] + 
+bD13 * ID1[i] * ID3[i] * ID4[i] + bD14 * ID2[i] * ID3[i] * ID4[i] +
+bD15 * ID1[i] * ID2[i] * ID3[i] * ID4[i])
+}
+for (i in 1:nSub) {  
+deltaAhat[i] <- deltahat[i, 1]
+deltaBhat[i] <- deltahat[i, 2]
+deltaThat[i] <- deltahat[i, 3]
+deltaDhat[i] <- deltahat[i, 4]
+#individual deviations follow a multivariate normal distribution
+deltahat[i, 1:nParams] ~ dmnorm(mudeltahat[1:nParams], SigmaInv[1:nParams, 1:nParams])
+}
+#priors
+mudeltahat[1] <- 0 #deltaAhat deviations
+mudeltahat[2] <- 0 #deltaBhat deviations
+mudeltahat[3] <- 0 #deltaThat deviations
+mudeltahat[4] <- 0 #deltaDhat deviations
+#parameter expansion for efficient sampling
+xiAhat ~ dunif(0, 100)
+xiBhat ~ dunif(0, 100)
+xiThat ~ dunif(0, 100)
+xiDhat ~ dunif(0, 100)
+muAhat ~ dnorm(0, 1)
+muBhat ~ dnorm(0, 1)
+muThat ~ dnorm(0, 1)
+muDhat ~ dnorm(0, 1)
+bA1 ~ dnorm(0, 1)
+bA2 ~ dnorm(0, 1)
+bA3 ~ dnorm(0, 1)
+bA4 ~ dnorm(0, 1)
+bA5 ~ dnorm(0, 1)
+bA6 ~ dnorm(0, 1)
+bA7 ~ dnorm(0, 1)
+bB1 ~ dnorm(0, 1)
+bB2 ~ dnorm(0, 1)
+bB3 ~ dnorm(0, 1)
+bB4 ~ dnorm(0, 1)
+bB5 ~ dnorm(0, 1)
+bB6 ~ dnorm(0, 1)
+bB7 ~ dnorm(0, 1)
+bT1 ~ dnorm(0, 1)
+bT2 ~ dnorm(0, 1)
+bT3 ~ dnorm(0, 1)
+bT4 ~ dnorm(0, 1)
+bT5 ~ dnorm(0, 1)
+bT6 ~ dnorm(0, 1)
+bT7 ~ dnorm(0, 1)
+bD1 ~ dnorm(0, 1)
+bD2 ~ dnorm(0, 1)
+bD3 ~ dnorm(0, 1)
+bD4 ~ dnorm(0, 1)
+bD5 ~ dnorm(0, 1)
+bD6 ~ dnorm(0, 1)
+bD7 ~ dnorm(0, 1)
+bD8 ~ dnorm(0, 1)
+bD9 ~ dnorm(0, 1)
+bD10 ~ dnorm(0, 1)
+bD11 ~ dnorm(0, 1)
+bD12 ~ dnorm(0, 1)
+bD13 ~ dnorm(0, 1)
+bD14 ~ dnorm(0, 1)
+bD15 ~ dnorm(0, 1)
+df <- nParams + 1
+#Wishart distribution as a prior for the inverse covariance matrix, see
+#Lee & Wagenmakers (2014; p. 192), Klauer (2010; pp. 77-78); Gelman & Hill (2007; pp. 284-287)
+SigmaInv[1:nParams, 1:nParams] ~ dwish(I[1:nParams, 1:nParams], df)
+#post-processing means, standard deviations, correlations
+muA <- .1 + 4.9 * phi(muAhat)
+muB <- .05 + .90 * phi(muBhat)
+muT <- phi(muThat)
+muD <- -5 + 10 * phi(muDhat)
+Sigma[1:nParams, 1:nParams] <- inverse(SigmaInv[1:nParams, 1:nParams])
+sigmaA <- xiAhat * sqrt(Sigma[1,1])
+sigmaB <- xiBhat * sqrt(Sigma[2,2])
+sigmaT <- xiThat * sqrt(Sigma[3,3])
+sigmaD <- xiDhat * sqrt(Sigma[4,4])
+for(i in 1:nParams) {
+for(j in 1:nParams) {
+rho[i, j] <- Sigma[i, j] / sqrt(Sigma[i, i] * Sigma[j, j])
+}
+}
+}
+
